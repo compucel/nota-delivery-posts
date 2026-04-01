@@ -1,7 +1,7 @@
-name: Publish Instagram Posts
-
+name: Publish Next Instagram Post
 on:
   schedule:
+    - cron: '0 10 1-30 4 *'
     - cron: '0 11 1-30 4 *'
     - cron: '0 12 1-30 4 *'
     - cron: '0 13 1-30 4 *'
@@ -13,17 +13,7 @@ on:
     - cron: '0 19 1-30 4 *'
     - cron: '0 20 1-30 4 *'
     - cron: '0 21 1-30 4 *'
-    - cron: '0 22 1-30 4 *'
   workflow_dispatch:
-    inputs:
-      day:
-        description: 'Dia (formato DD, ex: 01). Deixe vazio para usar o dia atual (BRT).'
-        required: false
-        default: ''
-      post:
-        description: 'Número do post (formato DD, ex: 01). Deixe vazio para usar o próximo não publicado.'
-        required: false
-        default: ''
 
 jobs:
   publish:
@@ -32,174 +22,156 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine day and post
-        id: calc
+      - name: Determine day and next post
+        id: info
         run: |
-          export TZ='America/Sao_Paulo'
-          MONTH=$(date +%-m)
-          DAY_NUM=$(date +%-d)
+          DAY=$(date -u -d '-3 hours' '+%d')
+          MONTH=$(date -u -d '-3 hours' '+%m')
+          echo "day=$DAY" >> $GITHUB_OUTPUT
+          echo "month=$MONTH" >> $GITHUB_OUTPUT
 
-          # Override with inputs if provided
-          if [ -n "${{ github.event.inputs.day }}" ]; then
-            DAY_PAD="${{ github.event.inputs.day }}"
-          else
-            if [ "$MONTH" != "4" ]; then
-              echo "Não estamos em abril. Saindo."
-              echo "skip=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            DAY_PAD=$(printf "%02d" $DAY_NUM)
-          fi
-
-          if [ -n "${{ github.event.inputs.post }}" ]; then
-            POST_PAD="${{ github.event.inputs.post }}"
-            echo "day=$DAY_PAD" >> $GITHUB_OUTPUT
-            echo "post=$POST_PAD" >> $GITHUB_OUTPUT
-            echo "skip=false" >> $GITHUB_OUTPUT
-            echo "Usando input manual: dia-${DAY_PAD}/post-${POST_PAD}"
-            exit 0
-          fi
-
-          # Determine next post from published-log.json
-          DATE_KEY="2026-04-${DAY_PAD}"
-          PUBLISHED_COUNT=0
-          if [ -f "abril-2026/published-log.json" ]; then
-            PUBLISHED_COUNT=$(python3 -c "
-import json, sys
-try:
-    with open('abril-2026/published-log.json') as f:
-        data = json.load(f)
-    posts = data.get('${DATE_KEY}', [])
-    print(len(posts))
-except:
-    print(0)
-")
-          fi
-
-          echo "Posts já publicados hoje: $PUBLISHED_COUNT"
-
-          if [ "$PUBLISHED_COUNT" -ge 12 ]; then
-            echo "Todos os 12 posts do dia já foram publicados."
+          if [ "$MONTH" != "04" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Não estamos em abril."
             exit 0
           fi
 
-          POST_NUM=$((PUBLISHED_COUNT + 1))
-          POST_PAD=$(printf "%02d" $POST_NUM)
+          LOG="abril-2026/published-log.json"
+          if [ ! -f "$LOG" ] || [ "$(cat $LOG)" = "{}" ]; then
+            NEXT=1
+          else
+            COUNT=$(jq -r ".\"2026-04-$DAY\" | length // 0" "$LOG")
+            NEXT=$(($COUNT + 1))
+          fi
 
-          echo "day=$DAY_PAD" >> $GITHUB_OUTPUT
-          echo "post=$POST_PAD" >> $GITHUB_OUTPUT
+          if [ "$NEXT" -gt 12 ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Todos os 12 posts do dia $DAY publicados!"
+            exit 0
+          fi
+
+          POST_NUM=$(printf '%02d' $NEXT)
+          echo "next=$NEXT" >> $GITHUB_OUTPUT
+          echo "post_num=$POST_NUM" >> $GITHUB_OUTPUT
           echo "skip=false" >> $GITHUB_OUTPUT
-          echo "Próximo post: dia-${DAY_PAD}/post-${POST_PAD}"
+          echo "Próximo: post-$POST_NUM do dia-$DAY"
+
+      - name: Read caption
+        if: steps.info.outputs.skip != 'true'
+        id: caption
+        run: |
+          DAY=${{ steps.info.outputs.day }}
+          POST_NUM=${{ steps.info.outputs.post_num }}
+          CAPTION=$(jq -r ".\"dia-${DAY}\".\"post-${POST_NUM}\"" abril-2026/captions.json)
+          if [ "$CAPTION" = "null" ] || [ -z "$CAPTION" ]; then
+            CAPTION="Nota Delivery - Simplifique sua gestao! Teste 7 dias gratis - link na bio #notadelivery #delivery #gestao #restaurante"
+          fi
+          echo "$CAPTION" > /tmp/caption.txt
 
       - name: Publish post
-        id: publish_step
-        if: steps.calc.outputs.skip == 'false'
+        if: steps.info.outputs.skip != 'true'
+        id: publish
         env:
-          TOKEN: ${{ secrets.META_PAGE_TOKEN }}
+          PAGE_TOKEN: ${{ secrets.PAGE_TOKEN }}
         run: |
-          DAY="${{ steps.calc.outputs.day }}"
-          POST="${{ steps.calc.outputs.post }}"
+          DAY=${{ steps.info.outputs.day }}
+          POST_NUM=${{ steps.info.outputs.post_num }}
+          NEXT=${{ steps.info.outputs.next }}
+          CAPTION=$(cat /tmp/caption.txt)
           IG_ID="17841453200002524"
-          IMG_FILE="abril-2026/dia-${DAY}/post-${POST}.png"
 
-          if [ ! -f "$IMG_FILE" ]; then
-            echo "ERRO: Arquivo não encontrado: $IMG_FILE"
-            exit 1
+          IS_CAROUSEL=false
+          if [ $((NEXT % 2)) -eq 0 ]; then
+            SLIDES=$(ls abril-2026/dia-${DAY}/post-${POST_NUM}-slide-*.png 2>/dev/null | wc -l)
+            if [ "$SLIDES" -ge 2 ]; then
+              IS_CAROUSEL=true
+            fi
           fi
 
-          IMG="https://raw.githubusercontent.com/${{ github.repository }}/main/${IMG_FILE}"
+          if [ "$IS_CAROUSEL" = "true" ]; then
+            echo "=== CARROSSEL com $SLIDES slides ==="
+            CHILDREN=""
+            for SLIDE in abril-2026/dia-${DAY}/post-${POST_NUM}-slide-*.png; do
+              SLIDE_NAME=$(basename "$SLIDE")
+              SLIDE_URL="https://raw.githubusercontent.com/compucel/nota-delivery-posts/main/abril-2026/dia-${DAY}/${SLIDE_NAME}"
+              echo "Upload slide: $SLIDE_URL"
+              CHILD=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media" \
+                --data-urlencode "image_url=${SLIDE_URL}" \
+                -d "is_carousel_item=true" \
+                -d "access_token=${PAGE_TOKEN}" | jq -r '.id')
+              echo "Child ID: $CHILD"
+              if [ -n "$CHILDREN" ]; then CHILDREN="${CHILDREN},${CHILD}"; else CHILDREN="$CHILD"; fi
+              sleep 3
+            done
 
-          # Read caption from captions.json
-          CAP=$(python3 -c "
-import json
-try:
-    with open('abril-2026/captions.json') as f:
-        data = json.load(f)
-    cap = data.get('dia-${DAY}', {}).get('post-${POST}', '')
-    print(cap)
-except Exception as e:
-    print('')
-" 2>/dev/null)
+            echo "Criando carousel container..."
+            CAR_RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media" \
+              -d "media_type=CAROUSEL" \
+              -d "children=${CHILDREN}" \
+              --data-urlencode "caption=${CAPTION}" \
+              -d "access_token=${PAGE_TOKEN}")
+            CONTAINER_ID=$(echo "$CAR_RESPONSE" | jq -r '.id')
+            echo "Carousel container: $CONTAINER_ID"
 
-          if [ -z "$CAP" ]; then
-            CAP="🍕 Nota Delivery — Simplifique sua gestão! Teste 7 dias grátis — link na bio #notadelivery #delivery #gestao #restaurante"
+            if [ "$CONTAINER_ID" = "null" ] || [ -z "$CONTAINER_ID" ]; then
+              echo "ERRO carousel: $CAR_RESPONSE"
+              exit 1
+            fi
+          else
+            echo "=== POST ESTÁTICO ==="
+            IMAGE_URL="https://raw.githubusercontent.com/compucel/nota-delivery-posts/main/abril-2026/dia-${DAY}/post-${POST_NUM}.png"
+            echo "Image: $IMAGE_URL"
+            RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media" \
+              --data-urlencode "image_url=${IMAGE_URL}" \
+              --data-urlencode "caption=${CAPTION}" \
+              -d "access_token=${PAGE_TOKEN}")
+            CONTAINER_ID=$(echo "$RESPONSE" | jq -r '.id')
+            echo "Container: $CONTAINER_ID"
+
+            if [ "$CONTAINER_ID" = "null" ] || [ -z "$CONTAINER_ID" ]; then
+              echo "ERRO: $RESPONSE"
+              exit 1
+            fi
           fi
 
-          echo "Imagem: $IMG"
-          echo "Caption (primeiros 80 chars): ${CAP:0:80}..."
-
-          # Create container
-          RES=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media" \
-            --data-urlencode "image_url=${IMG}" \
-            --data-urlencode "caption=${CAP}" \
-            -d "access_token=${TOKEN}")
-          echo "Container response: $RES"
-
-          CID=$(echo "$RES" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
-          if [ -z "$CID" ] || [ "$CID" = "None" ]; then
-            echo "ERRO ao criar container: $RES"
-            exit 1
-          fi
-          echo "Container ID: $CID"
-
-          # Wait for processing
+          echo "Aguardando processamento..."
           sleep 10
 
-          # Publish
+          echo "Publicando..."
           PUB=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media_publish" \
-            -d "creation_id=${CID}" \
-            -d "access_token=${TOKEN}")
-          echo "Publish response: $PUB"
+            -d "creation_id=${CONTAINER_ID}" \
+            -d "access_token=${PAGE_TOKEN}")
+          MEDIA_ID=$(echo "$PUB" | jq -r '.id')
+          echo "media_id=$MEDIA_ID" >> $GITHUB_OUTPUT
 
-          MEDIA_ID=$(echo "$PUB" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
-          if [ -z "$MEDIA_ID" ] || [ "$MEDIA_ID" = "None" ]; then
+          if [ "$MEDIA_ID" = "null" ] || [ -z "$MEDIA_ID" ]; then
             echo "ERRO ao publicar: $PUB"
             exit 1
           fi
 
-          echo "✅ PUBLICADO! Media ID: $MEDIA_ID"
-          echo "media_id=$MEDIA_ID" >> $GITHUB_OUTPUT
+          echo "PUBLICADO! Media ID: $MEDIA_ID"
 
-      - name: Update published log and push
-        if: steps.calc.outputs.skip == 'false' && steps.publish_step.outputs.media_id != ''
+      - name: Update log and push
+        if: steps.info.outputs.skip != 'true'
         run: |
-          DAY="${{ steps.calc.outputs.day }}"
-          POST="${{ steps.calc.outputs.post }}"
-          MEDIA_ID="${{ steps.publish_step.outputs.media_id }}"
+          DAY=${{ steps.info.outputs.day }}
+          NEXT=${{ steps.info.outputs.next }}
+          POST_NUM=${{ steps.info.outputs.post_num }}
+          MEDIA_ID=${{ steps.publish.outputs.media_id }}
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          python3 -c "
-import json, datetime
+          jq --arg day "2026-04-${DAY}" \
+             --arg post "$NEXT" \
+             --arg media "$MEDIA_ID" \
+             --arg time "$NOW" \
+             '.[$day] += [{"post": ($post|tonumber), "mediaId": $media, "publishedAt": $time}]' \
+             abril-2026/published-log.json > tmp.json && mv tmp.json abril-2026/published-log.json
 
-log_file = 'abril-2026/published-log.json'
-try:
-    with open(log_file) as f:
-        data = json.load(f)
-except:
-    data = {}
+          cat abril-2026/published-log.json
 
-date_key = '2026-04-${DAY}'
-if date_key not in data:
-    data[date_key] = []
-
-data[date_key].append({
-    'post': int('${POST}'),
-    'mediaId': '${MEDIA_ID}',
-    'publishedAt': datetime.datetime.utcnow().isoformat() + 'Z'
-})
-
-count = len(data[date_key])
-with open(log_file, 'w') as f:
-    json.dump(data, f, indent=2, ensure_ascii=False)
-print(f'Log atualizado: {count}/12 posts publicados em 2026-04-${DAY}')
-"
-
-          git config user.email 'actions@github.com'
-          git config user.name 'GitHub Actions'
+          git config user.name "nota-delivery-bot"
+          git config user.email "bot@notadelivery.com"
           git add abril-2026/published-log.json
-          git commit -m "chore: published dia-${DAY}/post-${POST} [skip ci]"
+          git commit -m "post-${POST_NUM} dia-${DAY} publicado (Media: ${MEDIA_ID})"
           git push
-          echo "✅ Log atualizado e push realizado."
