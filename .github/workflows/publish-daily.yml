@@ -1,0 +1,96 @@
+name: Publish Instagram Posts
+
+on:
+  schedule:
+    - cron: '0 11 1-30 4 *'
+    - cron: '0 12 1-30 4 *'
+    - cron: '0 13 1-30 4 *'
+    - cron: '0 14 1-30 4 *'
+    - cron: '0 15 1-30 4 *'
+    - cron: '0 16 1-30 4 *'
+    - cron: '0 17 1-30 4 *'
+    - cron: '0 18 1-30 4 *'
+    - cron: '0 19 1-30 4 *'
+    - cron: '0 20 1-30 4 *'
+    - cron: '0 21 1-30 4 *'
+    - cron: '0 22 1-30 4 *'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine day and post
+        id: calc
+        run: |
+          export TZ='America/Sao_Paulo'
+          DAY=$(date +%-d)
+          HOUR=$(date +%-H)
+          POST=$((HOUR - 7))
+          if [ $POST -lt 1 ] || [ $POST -gt 12 ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          DAY_PAD=$(printf "%02d" $DAY)
+          POST_PAD=$(printf "%02d" $POST)
+          echo "day=$DAY_PAD" >> $GITHUB_OUTPUT
+          echo "post=$POST_PAD" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "Dia $DAY_PAD Post $POST_PAD"
+
+      - name: Publish
+        if: steps.calc.outputs.skip == 'false'
+        run: |
+          DAY=${{ steps.calc.outputs.day }}
+          POST=${{ steps.calc.outputs.post }}
+          TOKEN="${{ secrets.META_PAGE_TOKEN }}"
+          IG_ID="17841453200002524"
+          POST_DIR="abril-2026/dia-${DAY}/post-${POST}"
+
+          # Check static or carousel
+          if [ -f "${POST_DIR}/post.png" ]; then
+            echo "ESTATICO dia-${DAY} post-${POST}"
+            IMG="https://raw.githubusercontent.com/${{ github.repository }}/main/abril-2026/dia-${DAY}/post-${POST}.png"
+            CAP=""
+            [ -f "${POST_DIR}/descricao.txt" ] && CAP=$(cat "${POST_DIR}/descricao.txt")
+
+            RES=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media" \
+              --data-urlencode "image_url=${IMG}" --data-urlencode "caption=${CAP}" -d "access_token=${TOKEN}")
+            CID=$(echo $RES | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+            [ -z "$CID" ] && echo "ERRO: $RES" && exit 1
+            sleep 5
+            PUB=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media_publish" \
+              -d "creation_id=${CID}" -d "access_token=${TOKEN}")
+            echo "PUBLICADO: $PUB"
+
+          elif ls ${POST_DIR}/slide-*.png 1>/dev/null 2>&1; then
+            echo "CARROSSEL dia-${DAY} post-${POST}"
+            CAP=""
+            [ -f "${POST_DIR}/descricao.txt" ] && CAP=$(cat "${POST_DIR}/descricao.txt")
+
+            CHILDREN=""
+            for S in 01 02 03 04; do
+              SFILE="abril-2026/dia-${DAY}/post-${POST}-slide-${S}.png"
+              [ ! -f "$SFILE" ] && continue
+              SURL="https://raw.githubusercontent.com/${{ github.repository }}/main/${SFILE}"
+              CH=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media" \
+                --data-urlencode "image_url=${SURL}" -d "is_carousel_item=true" -d "access_token=${TOKEN}")
+              CHID=$(echo $CH | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+              [ -n "$CHID" ] && CHILDREN="${CHILDREN},${CHID}"
+              sleep 2
+            done
+            CHILDREN="${CHILDREN:1}"
+
+            CAR=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media" \
+              -d "media_type=CAROUSEL" -d "children=${CHILDREN}" \
+              --data-urlencode "caption=${CAP}" -d "access_token=${TOKEN}")
+            CARID=$(echo $CAR | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+            sleep 5
+            PUB=$(curl -s -X POST "https://graph.facebook.com/v21.0/${IG_ID}/media_publish" \
+              -d "creation_id=${CARID}" -d "access_token=${TOKEN}")
+            echo "PUBLICADO: $PUB"
+          else
+            echo "Nenhum arquivo para dia-${DAY}/post-${POST}"
+          fi
